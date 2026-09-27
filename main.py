@@ -4,7 +4,7 @@
     python main.py data/sample.csv [--output-dir output]
 
 按「读入与概览 → 校验与清洗 → 统计与导出」三步处理报名表。
-当前实现到需求 2（读入概览、校验与问题清单导出），需求 3 随后续 PR 加入。
+三个需求（读入概览、校验与问题清单、统计与导出）全部实现。
 全程只读取原始文件，不修改原 CSV。
 """
 
@@ -105,10 +105,11 @@ def validate_row(row: dict, id_counts: Counter) -> list[str]:
     return reasons
 
 
-def run_validation(df: pd.DataFrame) -> pd.DataFrame:
-    """需求 2：校验全部行，返回问题清单（原始数据 + 数据行号 + 问题原因）。
+def run_validation(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """需求 2：校验全部行，返回 (问题清单, 干净数据)。
 
-    一行有多个问题时，原因用「；」合并在同一格（README 设计假设第 3 条）。
+    问题清单 = 原始数据 + 数据行号 + 问题原因，一行有多个原因时用「；」
+    合并在同一格（README 设计假设第 3 条）。干净数据 = 未违反任何校验的行。
     """
     ids = df["学号"].astype(str).str.strip()
     id_counts = Counter(x for x in ids if x != "")
@@ -122,7 +123,11 @@ def run_validation(df: pd.DataFrame) -> pd.DataFrame:
     problems = df.iloc[problem_positions].copy()
     problems.insert(0, "数据行号", [pos + 1 for pos in problem_positions])
     problems["问题原因"] = ["；".join(all_reasons[pos]) for pos in problem_positions]
-    return problems
+
+    clean = df.iloc[[i for i, reasons in enumerate(all_reasons) if not reasons]].copy()
+    # 清洗：去首尾空格后导出；问题清单保留原始写法（README 设计假设第 9 条）
+    clean = clean.apply(lambda col: col.str.strip())
+    return problems, clean
 
 
 def export_problems(problems: pd.DataFrame, output_dir: Path) -> Path:
@@ -144,6 +149,36 @@ def print_validation_summary(problems: pd.DataFrame, out_path: Path) -> None:
         print(f"  数据行 {row['数据行号']}（{row['姓名']}）：{row['问题原因']}")
 
 
+def export_stats(clean: pd.DataFrame, output_dir: Path) -> None:
+    """需求 3：按第一志愿分组统计人数，统计单/双志愿人数，导出汇总表与干净数据。"""
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # 按第一志愿分组统计（人数降序，同数按出现先后）
+    group_counts = clean["志愿1"].str.strip().value_counts()
+    summary = pd.DataFrame({"志愿1": group_counts.index, "人数": group_counts.values})
+    summary_path = output_dir / "志愿汇总表.csv"
+    summary.to_csv(summary_path, index=False, encoding="utf-8-sig")
+
+    # 志愿填写情况：志愿 2 非空 = 两个志愿都填
+    choice2_empty = is_empty(clean["志愿2"])
+    both = int((~choice2_empty).sum())
+    only_one = int(choice2_empty.sum())
+
+    clean_path = output_dir / "清洗后报名表.csv"
+    clean.to_csv(clean_path, index=False, encoding="utf-8-sig")
+
+    print()
+    print("========== 志愿统计 ==========")
+    print(f"按第一志愿分组（干净数据 {len(clean)} 人）：")
+    for _, row in summary.iterrows():
+        print(f"  {row['志愿1']}: {row['人数']}")
+    print("志愿填写情况：")
+    print(f"  两个志愿都填：{both} 人")
+    print(f"  只填一个志愿：{only_one} 人")
+    print(f"干净数据已导出：{clean_path}（{len(clean)} 行）")
+    print(f"志愿汇总表已导出：{summary_path}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="协会招新报名表数据处理小工具")
     parser.add_argument("csv", help="报名表 CSV 文件路径")
@@ -153,9 +188,10 @@ def main() -> None:
     df = load_csv(args.csv)
     print_overview(df)
 
-    problems = run_validation(df)
+    problems, clean = run_validation(df)
     out_path = export_problems(problems, Path(args.output_dir))
     print_validation_summary(problems, out_path)
+    export_stats(clean, Path(args.output_dir))
 
 
 if __name__ == "__main__":
